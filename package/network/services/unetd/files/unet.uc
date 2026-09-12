@@ -549,6 +549,7 @@ function network_invite_peer_update(model, ctx, msg)
 		model.status_msg("Updated configuration");
 	}
 
+	model.run_hook("unet_enroll", "invite_done");
 	__network_enroll_cancel(model, ctx);
 }
 
@@ -576,13 +577,16 @@ function network_invite(ctx, argv, named)
 	invite.sub = model.ubus.subscriber((msg) => {
 		if (msg.type == "enroll_peer_update")
 			network_invite_peer_update(ctx.model, ctx, msg);
-		else if (msg.type == "enroll_timeout")
+		else if (msg.type == "enroll_timeout") {
+			ctx.model.run_hook("unet_enroll", "invite_timeout");
 			__network_enroll_cancel(ctx.model, ctx);
+		}
 	});
 
 	let req = {
 		network,
 		timeout: named.timeout,
+		enroll_info: { network },
 	};
 
 	if (named["access-key"]) {
@@ -603,11 +607,12 @@ function network_invite(ctx, argv, named)
 function network_join_peer_update(model, ctx, msg)
 {
 	let joinreq = ctx.data.enroll;
-	let name = joinreq.name;
 
 	let data = network_handle_enroll_update(model, ctx, msg);
 	if (!data)
 		return;
+
+	let name = data.enroll_meta?.network ?? joinreq.name;
 
 	let iface = {
 		proto: "unet",
@@ -627,6 +632,7 @@ function network_join_peer_update(model, ctx, msg)
 
 	model.status_msg("Configuration added for interface " + name);
 
+	model.run_hook("unet_enroll", "join_done");
 	__network_enroll_cancel(model, ctx);
 }
 
@@ -681,8 +687,10 @@ function network_join(ctx, argv, named)
 	data.sub = model.ubus.subscriber((msg) => {
 		if (msg.type == "enroll_peer_update")
 			network_join_peer_update(ctx.model, ctx, msg);
-		else if (msg.type == "enroll_timeout")
+		else if (msg.type == "enroll_timeout") {
+			ctx.model.run_hook("unet_enroll", "join_timeout");
 			__network_enroll_cancel(ctx.model, ctx);
+		}
 	});
 	data.sub.subscribe("unetd");
 	model.ubus.call("unetd", "enroll_start", req);
@@ -1018,6 +1026,13 @@ const host_editor = {
 					return keys(groups);
 				}
 			}
+		},
+		meta: {
+			help: "Metadata",
+			args: {
+				type: "json",
+				data_type: "object",
+			},
 		}
 	},
 };
@@ -1296,18 +1311,23 @@ const Unet = {
 			for (let name, host in status.peers) {
 				let cur = [];
 
-				data[`Host '${name}'`] = cur;
-				push(cur, [ "State", host.connected ? "connected" : "disconnected" ]);
-				if (!host.connected)
-					continue;
+				let key = name;
+				if (model.cb.opt_pretty_print) {
+					data[`Host '${name}'`] = cur;
+					push(cur, [ "State", host.connected ? "connected" : "disconnected" ]);
+					if (!host.connected)
+						continue;
 
-				if (host.endpoint)
-					push(cur, [ "IP address", host.endpoint ]);
+					if (host.endpoint)
+						push(cur, [ "IP address", host.endpoint ]);
 
-				push(cur, [ "Idle time", time_format(host.idle) ]);
-				push(cur, [ "Sent bytes", host.tx_bytes ]);
-				push(cur, [ "Received bytes", host.rx_bytes ]);
-				push(cur, [ "Last handshake", time_format(host.last_handshake_sec) + " ago" ]);
+					push(cur, [ "Idle time", time_format(host.idle) ]);
+					push(cur, [ "Sent bytes", host.tx_bytes ]);
+					push(cur, [ "Received bytes", host.rx_bytes ]);
+					push(cur, [ "Last handshake", time_format(host.last_handshake_sec) + " ago" ]);
+				} else {
+					data[name] = host;
+				}
 			}
 			return ctx.multi_table("Status of network " + name, data);
 		}

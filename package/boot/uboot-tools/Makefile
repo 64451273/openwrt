@@ -1,15 +1,15 @@
 include $(TOPDIR)/rules.mk
 
 PKG_DISTNAME:=u-boot
-PKG_VERSION:=2025.01
+PKG_VERSION:=2026.07
 PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_DISTNAME)-$(PKG_VERSION).tar.bz2
 PKG_SOURCE_URL:= \
 	https://ftp.denx.de/pub/u-boot \
-	https://mirror.cyberbits.eu/u-boot \
-	ftp://ftp.denx.de/pub/u-boot
-PKG_HASH:=cdef7d507c93f1bbd9f015ea9bc21fa074268481405501945abc6f854d5b686f
+	https://mirror.cyberbits.eu/u-boot
+PKG_URL:=https://docs.u-boot.org/en/latest/
+PKG_HASH:=78e8bfc382fe388f9b55aa1daf8c563522a037779b5d4c349d1415e381f1243e
 PKG_SOURCE_SUBDIR:=$(PKG_DISTNAME)-$(PKG_VERSION)
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_DISTNAME)-$(PKG_VERSION)
 
@@ -19,6 +19,7 @@ PKG_LICENSE:=GPL-2.0 GPL-2.0+
 PKG_LICENSE_FILES:=Licenses/README
 
 PKG_BUILD_PARALLEL:=1
+#PKG_FLAGS:=nonshared # Use PKGFLAGS instead of PKG_FLAGS for per-binary flags
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -27,7 +28,6 @@ define Package/dumpimage
 	CATEGORY:=Utilities
 	SUBMENU:=Boot Loaders
 	TITLE:=dumpimage lists and extracts data from U-Boot images.
-	URL:=http://www.denx.de/wiki/U-Boot
 endef
 
 define Package/dumpimage/description
@@ -42,7 +42,6 @@ define Package/fit-check-sign
 	CATEGORY:=Utilities
 	SUBMENU:=Boot Loaders
 	TITLE:=verify uImage.FIT
-	URL:=http://www.denx.de/wiki/U-Boot
 endef
 
 define Package/fit-check-sign/description
@@ -53,9 +52,8 @@ define Package/uboot-envtools
 	SECTION:=utils
 	CATEGORY:=Utilities
 	SUBMENU:=Boot Loaders
-	PKG_FLAGS+=nonshared
+	PKGFLAGS+=nonshared
 	TITLE:=read/modify U-Boot bootloader environment
-	URL:=http://www.denx.de/wiki/U-Boot
 endef
 
 define Package/uboot-envtools/description
@@ -71,8 +69,12 @@ endef
 
 define Build/Configure
 	$(call Build/Compile/Default,tools-only_defconfig)
-	$(SED) 's/CONFIG_TOOLS_LIBCRYPTO=y/# CONFIG_TOOLS_LIBCRYPTO is not set/' $(PKG_BUILD_DIR)/.config
-	$(SED) 's/CONFIG_TOOLS_KWBIMAGE=y/# CONFIG_TOOLS_KWBIMAGE is not set/' $(PKG_BUILD_DIR)/.config
+
+	$(PKG_BUILD_DIR)/scripts/config \
+		--file $(PKG_BUILD_DIR)/.config \
+		--disable TOOLS_KWBIMAGE \
+		--disable TOOLS_LIBCRYPTO \
+		--disable TOOLS_MKEFICAPSULE
 endef
 
 MAKE_FLAGS += \

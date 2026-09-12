@@ -563,6 +563,7 @@ mac80211_hostapd_setup_bss() {
 $hostapd_cfg
 bssid=$macaddr
 ${default_macaddr:+#default_macaddr}
+${random_macaddr:+#random_macaddr}
 ${dtim_period:+dtim_period=$dtim_period}
 ${max_listen_int:+max_listen_interval=$max_listen_int}
 EOF
@@ -590,16 +591,25 @@ get_board_phy_name() (
 		local val="$1"
 		local key="$2"
 		local ref_path="$3"
+		local type paths path
 
 		json_select "$key"
-		json_get_vars path
+		json_get_type type path
+		if [ "$type" = array ]; then
+			json_get_values paths path
+		else
+			json_get_vars path
+			paths="$path"
+		fi
 		json_select ..
 
-		[ "${ref_path%+*}" = "$path" ] && fallback_phy=$key
-		[ "$ref_path" = "$path" ] || return 0
+		for path in $paths; do
+			[ "${ref_path%+*}" = "${path%+*}" ] && fallback_phy=$key
+			[ "$ref_path" = "$path" ] || continue
 
-		echo "$key"
-		exit
+			echo "$key"
+			exit
+		done
 	}
 
 	json_load_file /etc/board.json
@@ -624,9 +634,21 @@ rename_board_phy_by_name() (
 	json_load_file /etc/board.json
 	json_select wlan
 	json_select "${phy%.*}" || return 0
-	json_get_vars path
 
-	prev_phy="$(iwinfo nl80211 phyname "path=$path${suffix:++$suffix}")"
+	local type paths path
+	json_get_type type path
+	if [ "$type" = array ]; then
+		json_get_values paths path
+	else
+		json_get_vars path
+		paths="$path"
+	fi
+
+	local prev_phy=
+	for path in $paths; do
+		prev_phy="$(iwinfo nl80211 phyname "path=$path${suffix:++$suffix}")"
+		[ -n "$prev_phy" ] && break
+	done
 	[ -n "$prev_phy" ] || return 0
 
 	[ "$prev_phy" = "$phy" ] && return 0
@@ -691,12 +713,14 @@ mac80211_prepare_vif() {
 	json_add_string _ifname "$ifname"
 
 	default_macaddr=
+	random_macaddr=
 	if [ -z "$macaddr" ]; then
 		macaddr="$(mac80211_generate_mac $phy)"
 		macidx="$(($macidx + 1))"
 		default_macaddr=1
 	elif [ "$macaddr" = 'random' ]; then
 		macaddr="$(macaddr_random)"
+		random_macaddr=1
 	fi
 	json_add_string _macaddr "$macaddr"
 	json_add_string _default_macaddr "$default_macaddr"
@@ -758,6 +782,14 @@ mac80211_prepare_iw_htmode() {
 						;;
 					esac
 				;;
+				6g)
+					if [ "$auto_channel" -eq 0 ] && [ "$channel" -gt 0 ]; then
+						local c_base=$(( (($channel - 1) / 8) * 8 + 1 ))
+						iw_htmode="40 $(( 5950 + ($c_base + 2) * 5 ))"
+					else
+						iw_htmode=""
+					fi
+				;;
 				*)
 					case "$(( ($channel / 4) % 2 ))" in
 						1) iw_htmode="HT40+" ;;
@@ -765,7 +797,7 @@ mac80211_prepare_iw_htmode() {
 					esac
 				;;
 			esac
-			[ "$auto_channel" -gt 0 ] && iw_htmode="HT40+"
+			[ "$auto_channel" -gt 0 ] && [ "$band" != "6g" ] && iw_htmode="HT40+"
 		;;
 		VHT80|HE80|EHT80)
 			iw_htmode="80MHz"
@@ -1015,7 +1047,7 @@ mac80211_setup_supplicant() {
 	wpa_supplicant_prepare_interface "$ifname" nl80211 || return 1
 
 	if [ "$mode" = "sta" ]; then
-		wpa_supplicant_add_network "$ifname"
+		wpa_supplicant_add_network "$ifname" "" "$htmode"
 	else
 		wpa_supplicant_add_network "$ifname" "$freq" "$htmode" "$hostapd_noscan"
 	fi

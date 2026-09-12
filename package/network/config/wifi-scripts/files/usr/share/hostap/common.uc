@@ -101,7 +101,9 @@ function wdev_create(phy, name, data)
 		req["4addr"] = data["4addr"];
 	if (data.macaddr)
 		req.mac = data.macaddr;
-	if (data.radio != null && data.radio >= 0)
+	if (data.radio_mask > 0)
+		req.vif_radio_mask = data.radio_mask;
+	else if (data.radio != null && data.radio >= 0)
 		req.vif_radio_mask = 1 << data.radio;
 
 	nl80211.error();
@@ -276,28 +278,41 @@ const phy_proto = {
 		return macaddr_join(addr);
 	},
 
-	macaddr_next: function(val) {
+	macaddr_next: function(val, reuse) {
 		let data = this.macaddr_options ?? {};
 		let list = this.macaddr_list;
+		let addr;
 
 		for (let i = 0; i < 32; i++) {
 			data.id = i;
 
 			let mac = this.macaddr_generate(data);
 			if (!mac)
-				return null;
+				break;
 
-			if (list[mac] != null)
+			if (mac == reuse) {
+				addr = mac;
+				break;
+			}
+
+			if (addr != null || list[mac] != null)
 				continue;
 
-			list[mac] = val != null ? val : -1;
-			return mac;
+			addr = mac;
+			if (reuse == null)
+				break;
 		}
+
+		if (addr == null)
+			return null;
+
+		list[addr] = val != null ? val : -1;
+
+		return addr;
 	},
 
 	wdev_add: function(name, data) {
-		let phydev = this;
-		wdev_create(this.phy, name, {
+		return wdev_create(this.phy, name, {
 			...data,
 			radio: this.radio,
 		});

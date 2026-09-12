@@ -15,6 +15,7 @@ let ev_listener, sub;
 let networks = {};
 
 const USYNC_PORT = 51818;
+const TCP_TIMEOUT = 5 * 1000;
 
 const pubsub_proto = {
 	get_channel: function() {
@@ -43,7 +44,19 @@ function network_socket_close(data)
 	if (data.timer)
 		data.timer.cancel();
 	data.channel.disconnect();
-	data.socket.close();
+}
+
+function network_rx_cleanup_state(name)
+{
+	for (let cur, sub in core.remote_subscribe)
+		delete sub[name];
+
+	for (let cur, sub in core.remote_publish) {
+		if (!sub[name])
+			continue;
+		delete sub[name];
+		core.handle_publish(null, cur);
+	}
 }
 
 function network_rx_socket_close(data)
@@ -53,14 +66,10 @@ function network_rx_socket_close(data)
 
 	core.dbg(`Incoming connection from ${data.name} closed\n`);
 	let net = networks[data.network];
-	if (net && net.rx_channels[data.name] == data)
+	if (net && net.rx_channels[data.name] == data) {
 		delete net.rx_channels[data.name];
-
-	for (let name, sub in core.remote_subscribe)
-		delete sub[data.name];
-
-	for (let name, sub in core.remote_publish)
-		delete sub[data.name];
+		network_rx_cleanup_state(data.name);
+	}
 
 	network_socket_close(data);
 }
@@ -88,6 +97,8 @@ function network_socket_handle_request(sock_data, req)
 	let host = sock_data.name;
 	let network = sock_data.network;
 	let args = { ...req.args, host, network };
+	let tx_chan = net.tx_channels[host];
+	let tx_auth = tx_chan && tx_chan.auth;
 	switch (msgtype) {
 	case "publish":
 	case "subscribe":
@@ -96,8 +107,11 @@ function network_socket_handle_request(sock_data, req)
 		if (!name)
 			return;
 		if (args.enabled) {
-			if (list[name])
+			if (list[name]) {
+				if (tx_auth && msgtype == "publish")
+					core.handle_publish(null, name);
 				return 0;
+			}
 
 			let allowed = net.peers[host].allowed == null;
 			for (let cur in net.peers[host].allowed) {
@@ -114,10 +128,14 @@ function network_socket_handle_request(sock_data, req)
 				network: sock_data.network,
 				name: host,
 			}, pubsub_proto);
+			if (tx_auth && msgtype == "publish")
+				core.handle_publish(null, name);
 			list[name] = true;
 		} else {
 			if (!list[name])
 				return 0;
+			if (msgtype == "publish")
+				core.handle_publish(null, name);
 			delete core["remote_" + msgtype][name][host];
 			delete list[name];
 		}
@@ -185,9 +203,12 @@ function network_check_auth(sock_data, info)
 	if (sock_data.timer)
 		sock_data.timer.cancel();
 	sock_data.auth = true;
+	network_rx_cleanup_state(sock_data.name);
 	net.rx_channels[sock_data.name] = sock_data;
 	core.dbg(`Incoming connection from ${sock_data.name} established\n`);
-	if (!net.tx_channels[sock_data.name])
+
+	let chan = net.tx_channels[sock_data.name];
+	if (!chan || !chan.auth)
 		net.timer.set(100);
 }
 
@@ -280,11 +301,15 @@ function network_open_channel(net, name, peer)
 		return;
 
 	core.dbg(`Try to connect to ${name}\n`);
+	if (!sock.setopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, TCP_TIMEOUT))
+		warn(`Failed to set TCP user timeout on channel socket: ${socket.error()}\n`);
 	sock.connect(addr);
 	let auth_data_cb = (msg) => {
 		if (!network_auth_valid(sock_data.name, sock_data.id, msg.token))
 			return;
 
+		if (sock_data.timer)
+			sock_data.timer.cancel();
 		sock_data.auth = true;
 		core.dbg(`Outgoing connection to ${name} established\n`);
 
@@ -295,6 +320,11 @@ function network_open_channel(net, name, peer)
 					data: { name, enabled: true },
 					return: "ignore",
 				});
+
+		let rx_chan = net.rx_channels[name];
+		if (rx_chan)
+			for (let sub_name in rx_chan.publish)
+				core.handle_publish(null, sub_name);
 	};
 	let auth_cb = () => {
 		if (!sock_data.auth)
@@ -322,17 +352,29 @@ function network_open_channel(net, name, peer)
 			data_cb: auth_data_cb,
 			cb: auth_cb,
 		});
+		sock_data.timer = uloop.timer(10 * 1000, () => {
+			network_tx_socket_close(sock_data);
+		});
 
 		return 0;
 	};
 
 	let disconnect_cb = (req) => {
 		let net = networks[sock_data.network];
+		if (!net) {
+			network_tx_socket_close(sock_data);
+			return;
+		}
+
 		let cur_data = net.tx_channels[sock_data.name];
 		if (cur_data == sock_data)
-			delete net.rx_channels[sock_data.name];
+			delete net.tx_channels[sock_data.name];
 
 		network_tx_socket_close(sock_data);
+		if (net.timer.remaining() > 0)
+			return;
+
+		net.timer.set(sock_data.auth ? 100 : 10000);
 	};
 
 	sock_data.socket = sock;
@@ -384,7 +426,8 @@ function network_open(name, info)
 	net.rx_channels = {};
 	net.tx_channels = {};
 
-	net.socket.setopt(socket.SOL_TCP, socket.TCP_USER_TIMEOUT, 30 * 1000);
+	if (!net.socket.setopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, TCP_TIMEOUT))
+		warn(`Failed to set TCP user timeout on listen socket: ${socket.error()}\n`);
 
 	let cb = () => {
 		let addr = {};
@@ -405,6 +448,13 @@ function network_close(name)
 	net.timer.cancel();
 	net.handle.delete();
 	net.socket.close();
+
+	for (let peer, sock_data in net.rx_channels)
+		network_rx_socket_close(sock_data);
+
+	for (let peer, sock_data in net.tx_channels)
+		network_tx_socket_close(sock_data);
+
 	delete networks[name];
 }
 
@@ -489,7 +539,7 @@ function unetd_network_update()
 	}
 
 	for (let name in networks)
-		if (!data.networks)
+		if (!data.networks[name])
 			network_close(name);
 }
 
